@@ -1,0 +1,15 @@
+name: tool-garbled
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Returns the text it is given, unchanged. A copy of tool-echo that exists to be released wrongly on purpose.
+input_schema:
+  type: object
+  properties:
+    text:
+      type: string
+  required: [text]
+  murmur-destinations: []
+requires_files:
+  - tool_echo.wasm

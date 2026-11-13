@@ -1,0 +1,15 @@
+name: tool-echo
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Returns the text it is given, unchanged.
+input_schema:
+  type: object
+  properties:
+    text:
+      type: string
+  required: [text]
+  murmur-destinations: []
+requires_files:
+  - tool_echo.wasm

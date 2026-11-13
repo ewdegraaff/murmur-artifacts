@@ -1,0 +1,10 @@
+[workspace]
+members = ["tools/tool-echo", "hooks/hook-quiet"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.95"
+
+[workspace.dependencies]
+wit-bindgen = "0.59"

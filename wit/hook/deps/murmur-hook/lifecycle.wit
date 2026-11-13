@@ -1,0 +1,282 @@
+package murmur:hook@0.9.0;
+
+interface lifecycle {
+    record message {
+        role: string,
+        content: string,
+        /// Stable identity for this message, minted by the runtime as `msg_`
+        /// followed by a uuid-v7 simple form. A uuid-v7 carries its own
+        /// millisecond timestamp, so there is no separate `created-at` field to
+        /// keep in step with it.
+        ///
+        /// This is **not** a content hash. An id must never repeat, even for two
+        /// messages whose content is byte-identical; a content hash must repeat
+        /// whenever the content does. The two answer different questions and are
+        /// never interchangeable.
+        ///
+        /// Stripped before the wire payload is built — see the note on
+        /// `source-id`. Minted once, at the message's creation site, and
+        /// preserved everywhere after: an id on a message a hook hands back is
+        /// kept, and so is the id a message reloaded from the conversation
+        /// record carries. The runtime mints one only for a message that arrives
+        /// without one.
+        id: option<string>,
+        /// Opaque join key back to whatever produced this content — a corpus
+        /// record, a compaction summary, reloaded history. Recorded verbatim and
+        /// never parsed, exactly like `resource-id` in tool metadata: the runtime
+        /// makes no claim about its shape and reads no meaning out of it.
+        ///
+        /// Both `id` and `source-id` are stripped before the driver wire payload
+        /// is built. A uuid sitting at the head of a cached prefix is volatile
+        /// content, and would defeat provider prompt-prefix caching on every
+        /// request. A `source-id` a hook supplies is carried verbatim; the key is
+        /// absent when the hook supplied none.
+        source-id: option<string>,
+        /// Which hook output put this message into the conversation. Set only by
+        /// the runtime, at the moment it commits that output, and read from the
+        /// conversation record wherever the message is served back.
+        ///
+        /// `none` means no hook output inserted the message: it is a person's or
+        /// a delegating caller's task message, a model turn, a tool result, or a
+        /// runtime marker, and `role` tells those apart. The mark is independent
+        /// of `role`, so a summary returned as `"assistant"` or `"user"` carries
+        /// it all the same.
+        ///
+        /// A message a hook hands back unchanged keeps the mark it already had:
+        /// its `id` names a message in the context the hook was handed, and its
+        /// `role` and `content` equal that message's. Any other message a hook
+        /// returns is marked with the output it came in through. A value a hook
+        /// sets on a message it returns is ignored.
+        ///
+        /// Stripped before the driver wire payload is built, like `id` and
+        /// `source-id`.
+        inserted-by: option<context-insertion>,
+    }
+
+    /// The hook output a message entered the conversation through.
+    enum context-insertion {
+        /// A compaction hook's `replace-context`, including the summary the
+        /// runtime asks for when a seed overflows its budget.
+        replace-context,
+        /// An `on-task-start` hook's `seed-context`.
+        seed-context,
+    }
+
+    record tool-manifest {
+        binary-name: string,
+        content: string,
+    }
+
+    variant hook-output {
+        none,
+        replace-context(list<message>),
+        write-manifests(list<tool-manifest>),
+        /// Emit a structured artifact payload to the SSE event stream.
+        /// The string must be a valid JSON object.
+        artifact(string),
+        /// Control decision honored only at `on-task-end`: do not finalize the
+        /// task, re-run its agent loop with `reason` injected into the task
+        /// content as feedback, then let this hook re-inspect the result. Bounded
+        /// by the capsule's `lifecycle.max_task_reopens` budget and its
+        /// `inference.max_turns` ceiling. Returned from any other lifecycle event
+        /// it is a non-fatal dispatch fault (logged and traced, never honored).
+        reopen-task(string),
+        /// Context to seed a task with, distinct from `replace-context` because
+        /// seeding needs a ceiling and compaction must not have one: compaction's
+        /// contract is that the hook has already done the shrinking, so the host
+        /// takes what it is handed. A seed is proposed against a budget the host
+        /// enforces.
+        ///
+        /// Honored only at `on-task-start`, where the first bound blocking hook to
+        /// return it wins and its messages are placed at the head of the task's
+        /// context — ahead of any loaded history and ahead of the task message.
+        /// The list is chronological, oldest first, which is what makes the
+        /// runtime's "drop from the front" trim well-defined. Returned from any
+        /// other lifecycle event it is a non-fatal dispatch fault (logged and
+        /// traced, never honored).
+        ///
+        /// The host measures the proposal against `task-start-event.budget-tokens`
+        /// and may commit it whole, trim its oldest messages away, summarize the
+        /// overflowing front through the compaction hook, or refuse it entirely.
+        /// A refusal never fails the task.
+        seed-context(list<message>),
+        /// Refuse the call this event is about to make. Honored only at the decision-point
+        /// dispatch of `on-tool-call` and `on-shell` — the dispatch whose event carries
+        /// `outcome: none`. Returned from any other event, or from the post-call observation
+        /// dispatch of these two, it is a non-fatal dispatch fault: nothing is refused, because
+        /// the call has already happened or there is no call to refuse.
+        ///
+        /// The string is the reason the agent is shown. It must be non-empty; an empty reason
+        /// still denies, with a runtime-supplied reason naming the defect.
+        ///
+        /// A deny can only narrow. There is no arm that permits a call, and refusing one grants
+        /// nothing: the capability was already decided by the manifest, and this is a second,
+        /// stricter gate standing in front of it.
+        deny(string),
+    }
+
+    record session-context {
+        capsule-name: string,
+        capsule-version: string,
+        session-id: string,
+        model: string,
+        capabilities: list<string>,
+    }
+
+    record stage-event {
+        shell-allow: list<string>,
+    }
+
+    record task-start-event {
+        task-id: string,
+        context-id: string,
+        source: string,
+        input-bytes: u64,
+        /// Token ceiling a hook may propose context up to for this task:
+        /// `context.max_tokens` times `context.seed_budget`, rounded down. Read
+        /// `0` as "the host has not computed this" and decline, never as an
+        /// unbounded budget — a capsule declaring no `context.max_tokens` sends
+        /// `0` and refuses any seed returned against it.
+        budget-tokens: u64,
+        /// The capsule's `context.max_tokens`, or `0` when the manifest declares
+        /// none. Precomputed by the host so a hook measuring against the window
+        /// never has to know which model the session runs or how wide its window
+        /// is.
+        context-window: u64,
+        /// Tokens already occupied by context the host loaded before this task's
+        /// first turn: the conversation history a capsule running
+        /// `lifecycle.conversation: threaded` will start from, and `0` under every
+        /// other conversation mode. The same "`0` means not computed" reading
+        /// applies as for `budget-tokens`. Without it a hook seeding into a
+        /// threaded context duplicates history it cannot otherwise see.
+        prior-tokens: u64,
+    }
+
+    record task-end-event {
+        task-id: string,
+        exit-status: string,
+    }
+
+    record inference-event {
+        turn: u32,
+        input-tokens: u64,
+        output-tokens: u64,
+        decision: string,
+        tool-name: option<string>,
+        prompt: option<string>,
+        output: option<string>,
+        tools: option<string>,
+    }
+
+    /// What a completed tool call produced. Carried on `tool-event.outcome` at the
+    /// post-call observation dispatch, and absent at the decision point.
+    record tool-outcome {
+        output-bytes: u64,
+        duration-ms: u64,
+        status: string,
+    }
+
+    record tool-event {
+        turn: u32,
+        tool-name: string,
+        input-bytes: u64,
+        /// The exact tool input JSON the tool will receive, never truncated. A policy
+        /// hook must decide on this field and not on any summary of it.
+        input: string,
+        /// `none` means **this call has not run**. That is the decision point, the one
+        /// dispatch at which a returned `deny` is honored. `some(...)` is the post-call
+        /// observation: the call has already happened and nothing can be refused.
+        outcome: option<tool-outcome>,
+    }
+
+    /// What a completed shell call produced. Carried on `shell-event.outcome` at the
+    /// post-call observation dispatch, and absent at the decision point.
+    record shell-outcome {
+        exit-code: s32,
+        stdout: string,
+        stderr: string,
+        stdout-bytes: u64,
+        stderr-bytes: u64,
+        duration-ms: u64,
+    }
+
+    record shell-event {
+        turn: u32,
+        /// The program that was actually invoked, as a canonicalized absolute
+        /// filesystem path when the host could resolve the invoked name against
+        /// its `PATH` at dispatch time (e.g. `/usr/bin/pytest`). Falls back to
+        /// the bare invoked name when resolution finds nothing — never empty,
+        /// never an error. This is the only field that identifies *what ran*;
+        /// `command` carries the argument list alone.
+        binary: string,
+        /// The argument list the shell tool received — never the binary name
+        /// itself. For a shell interpreter (`bash`/`sh`/...) this is the script
+        /// text passed via `-c`.
+        ///
+        /// Truncated to 200 characters, and a display string only. A policy must
+        /// decide on `argv` and `script` and must never match against `command`.
+        command: string,
+        /// The exact argument list the runtime will pass to the executable, never
+        /// truncated. For a shell interpreter this is `["-c", <script>]`.
+        ///
+        /// It names what will actually run, which is what a policy has to decide on:
+        /// `command` is clipped and `binary` alone does not say what the program was
+        /// asked to do.
+        argv: list<string>,
+        /// The `-c` body when the interpreter form is used, never truncated, and
+        /// `none` for every other form. A policy must decide on this field rather
+        /// than on `command`.
+        script: option<string>,
+        /// The body of the recipe this call names, for the build tools the runtime
+        /// resolves: `make <target>`, `just <recipe>` and `npm run <script>`. A hook
+        /// gating `just build` decides on the text the justfile gives `build`, not on
+        /// the name alone.
+        ///
+        /// The runtime reads the recipe file out of the workdir it holds the grant on;
+        /// the hook never reads it and is handed no filesystem grant by this field.
+        ///
+        /// `none` when the call names no recipe, or when the runtime could not resolve
+        /// one — no recipe file, an unparseable one, a target that is not defined, or a
+        /// shape the parser does not model. Reading is best-effort: an absent body is
+        /// not an error, and it is never a signal that the call is safe.
+        recipe: option<string>,
+        /// `none` means **this call has not run**. That is the decision point, the one
+        /// dispatch at which a returned `deny` is honored. `some(...)` is the post-call
+        /// observation: the call has already happened and nothing can be refused.
+        outcome: option<shell-outcome>,
+    }
+
+    record compaction-event {
+        messages: list<message>,
+        session-tokens: u64,
+        threshold: f64,
+        /// Model the hook should use for its summarization call, when the
+        /// manifest configures one. `none` = use the capsule's primary
+        /// `inference.model`. Always `none` today; populated by a later slice.
+        model: option<string>,
+        /// System prompt override for the hook's summarization call. `none` =
+        /// the hook's own built-in prompt. Always `none` today; populated by a
+        /// later slice.
+        system-prompt: option<string>,
+    }
+
+    record session-end-event {
+        total-turns: u32,
+        total-input-tokens: u64,
+        total-output-tokens: u64,
+        total-tool-calls: u32,
+        total-shell-calls: u32,
+        duration-ms: u64,
+        exit-status: string,
+    }
+
+    on-stage: func(event: stage-event) -> result<hook-output, string>;
+    on-session-start: func(ctx: session-context) -> result<hook-output, string>;
+    on-task-start: func(event: task-start-event) -> result<hook-output, string>;
+    on-inference: func(event: inference-event) -> result<hook-output, string>;
+    on-tool-call: func(event: tool-event) -> result<hook-output, string>;
+    on-shell: func(event: shell-event) -> result<hook-output, string>;
+    on-compaction: func(event: compaction-event) -> result<hook-output, string>;
+    on-task-end: func(event: task-end-event) -> result<hook-output, string>;
+    on-session-end: func(event: session-end-event) -> result<hook-output, string>;
+}

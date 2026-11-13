@@ -1,0 +1,19 @@
+package murmur:runtime@0.4.0;
+
+/// Every hook component is compiled against this world.
+///
+/// `inference` and `tokens` are `murmur:runtime/inference@0.4.0` and
+/// `murmur:runtime/tokens@0.4.0` — the same package this world is declared in,
+/// so each is referenced by its bare interface name (a fully-qualified
+/// self-package reference does not resolve in wit-parser). Any further interface
+/// added to this package must be imported the same way.
+/// `murmur:task-io/read` and `murmur:conversation/read` live in their own
+/// packages and are therefore named in full, the same shape the lifecycle export
+/// uses.
+world hook {
+  import inference;
+  import tokens;
+  import murmur:task-io/read@0.1.0;
+  import murmur:conversation/read@0.2.0;
+  export murmur:hook/lifecycle@0.9.0;
+}
