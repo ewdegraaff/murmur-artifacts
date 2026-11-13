@@ -1,0 +1,14 @@
+/target/
+**/*.wasm
+**/*.mur.zip
+/release/
+
+# Capsule files of the session that built this repository, not part of the source
+/.murmur/
+/instructions.md
+/murmur.yaml
+/murmur.lock
+
+# Nexus
+/logs/
+/.tool-browser/

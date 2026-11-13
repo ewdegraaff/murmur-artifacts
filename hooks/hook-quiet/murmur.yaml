@@ -1,0 +1,8 @@
+name: hook-quiet
+version: 0.1.0
+runtime: hook
+execution_mode: async
+commit_policy: none
+description: Observes every lifecycle event and changes nothing.
+requires_files:
+  - hook_quiet.wasm
